@@ -1,17 +1,11 @@
 provider "aws" {
   region = var.aws_region
-
-  default_tags {
-    tags = {
-      hashicorp-learn = "lambda-api-gateway"
-    }
-  }
 }
 
 // BUCKET CREATION
 // Create a random bucket name to avoid naming conflicts
 resource "random_pet" "lambda_bucket_name" {
-  prefix = "learn-terraform-functions"
+  prefix = "serverless-key-value-app"
   length = 4
 }
 
@@ -36,86 +30,119 @@ resource "aws_s3_bucket_acl" "lambda_bucket" {
   acl    = "private"
 }
 
+# Create DynamoDB table
+resource "aws_dynamodb_table" "key_value_table" {
+  name           = "KeyValueTable" # Name your table
+  billing_mode   = "PROVISIONED"   # Use provisioned billing mode
+  hash_key       = "key"           # The hash key
+  read_capacity  = 1
+  write_capacity = 1
+
+  attribute {
+    name = "key"
+    type = "S" # 'S' for string type
+  }
+}
+
 // LAMBDA FUNCTION CREATION
 // Use "archive_file" to zip the lambda function code
-data "archive_file" "lambda_hello_world" {
-  type = "zip"
+data "archive_file" "lambda_key_value_app" {
+  type        = "zip"
 
   source_dir  = "${path.module}/functions"
   output_path = "${path.module}/functions.zip"
 }
 
 // Upload the zip file to the S3 bucket
-resource "aws_s3_object" "lambda_hello_world" {
-  bucket = aws_s3_bucket.lambda_bucket.id
+resource "aws_s3_object" "lambda_key_value_app" {
+  bucket  = aws_s3_bucket.lambda_bucket.id
 
-  key    = "functions.zip"
-  source = data.archive_file.lambda_hello_world.output_path
+  key     = "functions.zip"
+  source  = data.archive_file.lambda_key_value_app.output_path
 
-  etag = filemd5(data.archive_file.lambda_hello_world.output_path)
+  etag    = filemd5(data.archive_file.lambda_key_value_app.output_path)
+}
+
+// IAM Role for the Lambda Function
+resource "aws_iam_role" "lambda_iam_role" {
+  name = "lambda_iam_role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action = "sts:AssumeRole",
+        Effect = "Allow",
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        },
+      },
+    ],
+  })
+}
+
+// IAM Policy to Allow Lambda Function to Access DynamoDB
+resource "aws_iam_policy" "lambda_dynamodb_policy" {
+  name        = "lambda_dynamodb_policy"
+  description = "IAM policy for accessing DynamoDB from Lambda"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem"
+        ],
+        Effect = "Allow",
+        Resource = aws_dynamodb_table.key_value_table.arn
+      },
+    ],
+  })
+}
+
+# Attach the Policy to the Role
+resource "aws_iam_role_policy_attachment" "lambda_dynamodb_attach" {
+  role       = aws_iam_role.lambda_iam_role.name
+  policy_arn = aws_iam_policy.lambda_dynamodb_policy.arn
 }
 
 // Create the lambda function
-resource "aws_lambda_function" "hello_world" {
-  function_name = "HelloWorld"
+resource "aws_lambda_function" "key_value_app" {
+  function_name     = "KeyValueApp"
 
-  s3_bucket = aws_s3_bucket.lambda_bucket.id
-  s3_key    = aws_s3_object.lambda_hello_world.key
+  s3_bucket         = aws_s3_bucket.lambda_bucket.id
+  s3_key            = aws_s3_object.lambda_key_value_app.key
 
-  runtime = "nodejs18.x"
-  handler = "hello.handler"
+  runtime           = "nodejs16.x"
+  handler           = "index.handler"
 
-  source_code_hash = data.archive_file.lambda_hello_world.output_base64sha256
+  source_code_hash  = data.archive_file.lambda_key_value_app.output_base64sha256
 
-  role = aws_iam_role.lambda_exec.arn
+  role              = aws_iam_role.lambda_iam_role.arn
 }
 
 // MONITORING
 // Create a CloudWatch log group for the lambda function
-resource "aws_cloudwatch_log_group" "hello_world" {
-  name = "/aws/lambda/${aws_lambda_function.hello_world.function_name}"
+resource "aws_cloudwatch_log_group" "key_value_app" {
+  name              = "/aws/lambda/${aws_lambda_function.key_value_app.function_name}"
 
   retention_in_days = 5
 }
 
-// IAM ROLE CREATION
-// Fefines an IAM role that allows Lambda to access resources in your AWS account.
-resource "aws_iam_role" "lambda_exec" {
-  name = "serverless_lambda"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
-      Sid    = ""
-      Principal = {
-        Service = "lambda.amazonaws.com"
-      }
-      }
-    ]
-  })
-}
-
-// Assign basic execution role
-resource "aws_iam_role_policy_attachment" "lambda_policy" {
-  role       = aws_iam_role.lambda_exec.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-}
-
-
 // API GATEWAY CREATION
-// Create an API Gateway API
-resource "aws_apigatewayv2_api" "lambda" {
-  name          = "serverless_lambda_gw"
+// Create an API Gateway
+resource "aws_apigatewayv2_api" "key_value_api" {
+  name          = "KeyValueAPI"
   protocol_type = "HTTP"
 }
 
-// Create an API Gateway stage (e.g: "Dev", "Staging", and "Production")
-resource "aws_apigatewayv2_stage" "lambda" {
-  api_id = aws_apigatewayv2_api.lambda.id
+# // Create an API Gateway stage (e.g: "Dev", "Staging", and "Production")
+resource "aws_apigatewayv2_stage" "key_value_stage" {
+  api_id = aws_apigatewayv2_api.key_value_api.id
 
-  name        = "serverless_lambda_stage"
+  name        = "dev"
   auto_deploy = true
 
   access_log_settings {
@@ -137,36 +164,41 @@ resource "aws_apigatewayv2_stage" "lambda" {
   }
 }
 
-// Configures the API Gateway to use the Lambda function.
-resource "aws_apigatewayv2_integration" "hello_world" {
-  api_id = aws_apigatewayv2_api.lambda.id
+// Create a CloudWatch log group for the API Gateway
+resource "aws_cloudwatch_log_group" "api_gw" {
+  name              = "/aws/api_gw/${aws_apigatewayv2_api.key_value_api.name}"
 
-  integration_uri    = aws_lambda_function.hello_world.invoke_arn
+  retention_in_days = 5
+}
+
+
+// Configures the API Gateway to use the Lambda function.
+resource "aws_apigatewayv2_integration" "key_value_integration" {
+  api_id = aws_apigatewayv2_api.key_value_api.id
+
+  integration_uri    = aws_lambda_function.key_value_app.invoke_arn
   integration_type   = "AWS_PROXY"
   integration_method = "POST"
 }
 
 // Create an API Gateway route
-resource "aws_apigatewayv2_route" "hello_world" {
-  api_id = aws_apigatewayv2_api.lambda.id
-
-  route_key = "GET /hello"
-  target    = "integrations/${aws_apigatewayv2_integration.hello_world.id}"
+resource "aws_apigatewayv2_route" "key_value_get_route" {
+  api_id    = aws_apigatewayv2_api.key_value_api.id
+  route_key = "GET /keyvalue"
+  target    = "integrations/${aws_apigatewayv2_integration.key_value_integration.id}"
 }
 
-// Create a CloudWatch log group for the API Gateway
-resource "aws_cloudwatch_log_group" "api_gw" {
-  name = "/aws/api_gw/${aws_apigatewayv2_api.lambda.name}"
-
-  retention_in_days = 5
+resource "aws_apigatewayv2_route" "key_value_post_route" {
+  api_id    = aws_apigatewayv2_api.key_value_api.id
+  route_key = "POST /keyvalue"
+  target    = "integrations/${aws_apigatewayv2_integration.key_value_integration.id}"
 }
 
-// Create a Lambda permission to allow the API Gateway to invoke the Lambda function
-resource "aws_lambda_permission" "api_gw" {
+resource "aws_lambda_permission" "key_value_api_permission" {
   statement_id  = "AllowExecutionFromAPIGateway"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.hello_world.function_name
+  function_name = aws_lambda_function.key_value_app.function_name
   principal     = "apigateway.amazonaws.com"
 
-  source_arn = "${aws_apigatewayv2_api.lambda.execution_arn}/*/*"
+  source_arn = "${aws_apigatewayv2_api.key_value_api.execution_arn}/*/*"
 }
